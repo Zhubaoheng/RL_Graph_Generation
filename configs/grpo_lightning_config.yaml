@@ -1,0 +1,111 @@
+# GRPO PyTorch Lightning 训练配置文件
+# 参考原始配置结构，适配Lightning框架
+
+defaults:
+  - _self_
+  - general : general_default
+  - train : train_default
+
+# 通用配置
+general:
+    name : 'grpo_planar'
+    gpus : 3
+    swanlab: 'cloud'
+    resume: null            # If resume, path to ckpt file from outputs directory in main directory
+    test_only: null
+    check_val_every_n_epochs: 2000
+    sample_every_val: 1
+    samples_to_generate: 40
+    samples_to_save: 9
+    chains_to_save: 1
+    final_model_samples_to_generate: 40
+    final_model_samples_to_save: 30
+    final_model_chains_to_save: 0
+    sample_steps: 1000
+
+# 数据集配置
+dataset:
+  name: "planar"
+  datadir: 'data/planar/'   # 数据目录（用于参考数据）
+
+train:
+    seed: 0
+    n_epochs: 100000
+    batch_size: 64
+    save_model: True
+    n_workers: 32
+sample:
+
+    sample_steps: 100
+    time_distortion: 'polydec'
+    omega: 0.05
+    eta: 50
+    search: False           # 'all' | 'target_guidance' | 'distortion' | 'stochasticity' | False
+    # fixed
+    rdb: 'general'            # general | column | entry
+    rdb_crit: dummy   
+model:
+    transition: 'marginal'                          # uniform, marginal, argmax, absorbfirst, absorbing
+    model: 'graph_tf'
+    extra_features: 'rrwp'        # 'all', 'cycles', 'eigenvalues', 'rrwp', 'rrwp_comp' or null
+    rrwp_steps: 12
+    n_layers: 10
+
+    # Do not set hidden_mlp_E, dim_ffE too high, computing large tensors on the edges is costly
+    # At the moment (03/08), y contains quite little information
+    hidden_mlp_dims: { 'X': 128, 'E': 64, 'y': 128 }
+
+    # The dimensions should satisfy dx % n_head == 0
+    hidden_dims: { 'dx': 256, 'de': 64, 'dy': 64, 'n_head': 8, 'dim_ffX': 256, 'dim_ffE': 64, 'dim_ffy': 256 }
+    lambda_train: [5, 0]   
+# GRPO特定配置
+grpo:
+  # ===== 预训练模型 =====
+  pretrained_checkpoint: "/home/ly/max/checkpoints/planar-59999-14h.ckpt"  # 必须指定
+  ref_model_update_freq: 20000
+  # ===== GRPO训练参数（优化后）=====
+  learning_rate: 1e-7    # GRPO通常使用较低的学习率
+  total_steps: 1000000000       # 减少总训练步数用于测试
+  save_every: 100           # 每100步保存一次checkpoint
+
+  # ===== GRPO算法参数 =====
+  group_size: 16            # 每组的样本数（小批量降低内存）
+  num_groups: 3            # 组数（减少以降低内存使用）
+  kl_penalty: 0.001       # KL散度惩罚系数 (大幅降低，例如从 0.03 降至 0.0001 或更低)
+  clip_ratio: 0.2          # PPO裁剪比例
+  ent_coef: 0.1
+  # ===== 节点数配置（减少内存使用）=====
+  target_node_count: 64    # 进一步减少节点数
+  # node_count_range: [20, 40]  # 方式2: 节点数范围
+  # node_count_min: 20           # 方式3: 分别指定
+  # node_count_max: 40
+  
+  # ===== 奖励函数配置 =====
+  reward_type: "intrinsic_quality"  # 奖励函数类型: default, planar_metrics
+  target_density: 0.3      # 目标图密度（仅graph_property类型使用）
+  use_training_reference: true  # 是否使用训练数据作为参考
+  
+  # ===== 🔧 性能优化参数 =====
+  gradient_accumulation_steps: 1  # 梯度累积步数
+  gradient_clip_val: 1.0         # 梯度裁剪值
+  reference_update_frequency: 1000 # 参考模型更新频率（降低频率）
+  
+  # ===== 采样/评估模式 =====
+  # 如果设置了此路径，将进入纯采样模式，而不是训练
+  sample_only: null # "/home/ly/max/checkpoints/planar-59999-14h.ckpt"
+  num_samples_to_validate: 64 # 在纯采样模式下生成的样本数量
+  
+  # ===== Lightning特定配置 =====
+  log_every_n_steps: 10          # 日志记录频率
+  save_model: true               # 是否保存模型
+
+  resume_from_checkpoint: null   # GRPO checkpoint路径
+  
+
+
+# Hydra配置
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    chdir: true 
