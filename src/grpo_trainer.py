@@ -715,7 +715,7 @@ class GRPOTrainer:
         policy_loss = -torch.min(loss_unclipped, loss_clipped).mean()
         
         # --- KL 散度惩罚计算 ---
-        kl_divergence = log_ratio.mean()
+        kl_divergence = ((ratio - 1) - log_ratio).mean()
             
         # --- 策略熵计算 ---
         policy_entropy = self._compute_policy_entropy(model_preds, node_masks)
