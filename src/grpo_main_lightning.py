@@ -576,7 +576,6 @@ def run_grpo_lightning_sampling(cfg: DictConfig, checkpoint_path: str):
     # 5. 获取采样配置
     num_samples = cfg.grpo.get('num_samples_to_validate', 32)
     batch_size = cfg.grpo.group_size
-    print(f"📝 采样配置: 总样本数={num_samples}, 每批次大小={batch_size}")
     
     # 6. 执行采样和评估
     all_rewards = []

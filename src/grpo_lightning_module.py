@@ -170,16 +170,12 @@ class GRPOLightningModule(pl.LightningModule):
                         # 💡【调试】打印模型中所有可训练参数的名称
   
     def configure_optimizers(self):
-        print("🔧 [configure_optimizers] 正在配置优化器...")
+        print("🔧 [configure_optimizers] 正在配置优化器和学习率调度器...")
         
-        # 明确地从 GRPOTrainer 内部获取那个正在被用于计算的模型
-        # 这是最关键的一步，确保我们优化的就是那个正在进行前向传播的模型
         if not hasattr(self, 'grpo_trainer') or self.grpo_trainer is None:
             raise RuntimeError("GRPOTrainer 必须在 configure_optimizers 之前被初始化。")
 
-        # 我们要优化的，是 trainer 内部的 core_model
         target_model = self.grpo_trainer.core_model
-        
         trainable_params = list(target_model.parameters())
 
         if not trainable_params:
@@ -187,13 +183,39 @@ class GRPOLightningModule(pl.LightningModule):
 
         print(f"✅ [configure_optimizers] 成功从 GRPOTrainer.core_model 中找到 {len(trainable_params)} 个参数。")
 
+        # 1. 创建优化器
         optimizer = torch.optim.AdamW(
             trainable_params, 
-            lr=self.hparams.grpo.learning_rate,  # 从 hparams 获取
+            lr=self.hparams.grpo.learning_rate,
             weight_decay=1e-4
         )
         print("✅ 优化器已成功创建。")
-        return optimizer
+
+        # 2. 创建学习率调度器 (带预热)
+        warmup_steps = self.hparams.grpo.get('warmup_steps', 0)
+        
+        if warmup_steps > 0:
+            print(f"🔥 配置学习率预热: {warmup_steps} 步")
+            
+            def lr_lambda(current_step):
+                if current_step < warmup_steps:
+                    return float(current_step) / float(max(1, warmup_steps))
+                return 1.0
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+            
+            print("✅ 学习率调度器已成功创建。")
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step",  # 每个训练步都更新学习率
+                    "frequency": 1,
+                },
+            }
+        else:
+            print("✅ 未配置学习率预热。")
+            return optimizer
 
     def configure_gradient_clipping(self, optimizer, optimizer_idx=None, gradient_clip_val=0.0, gradient_clip_algorithm="value"):
         """重写默认梯度裁剪逻辑，当梯度全部为 None 时安全地跳过裁剪。

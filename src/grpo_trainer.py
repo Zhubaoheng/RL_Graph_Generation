@@ -54,6 +54,7 @@ class GRPOTrainer:
         self.clip_ratio = grpo_config.clip_ratio # PPO裁剪比例
         self.gradient_accumulation_steps = grpo_config.gradient_accumulation_steps
         self.ref_model_update_freq = getattr(grpo_config, 'ref_model_update_freq', 200) # 参考模型更新频率
+        self.sample_steps = getattr(cfg.sample, 'sample_steps', 100) # 采样步数
         
         # 检查模型是否被DataParallel包装
         self.is_multi_gpu = hasattr(model, 'module')
@@ -183,76 +184,35 @@ class GRPOTrainer:
                     print(f"🔧 检测到设备不一致，移动参考模型从 {ref_device} 到 {model_device}")
                     self.reference_model = self.reference_model.to(model_device)
 
-    def _update_reference_model(self, update_frequency: int = 1000):
+    def _update_reference_model(self, update_frequency: int = 100):
         """
-        更新参考策略模型，适配DDP架构。
+        使用Polyak平均（软更新）方法更新参考策略模型，以提高训练稳定性。
+        这种方法比硬拷贝更鲁棒，可以有效缓解策略发散问题。
         """
-        import torch.distributed as dist
-
         # 确保参考模型已创建，这是先决条件
         self._ensure_reference_model()
-        
-        # 在第0步之后才开始更新，因为第0步时模型和参考模型是完全一样的
-        if self.global_step > 0 and self.global_step % update_frequency == 0:
-            print(f"🔄 更新参考策略模型 (step {self.global_step}) (DDP模式)")
+
+        # 软更新可以更频繁地进行，但我们仍然保留频率控制选项
+        # 软更新在每一步都进行也是常见的做法
+        if self.global_step > 0 and self.global_step % self.ref_model_update_freq == 0:
             
-            device = next(self.model.parameters()).device
+            # 从配置中获取tau，如果未定义则使用一个合理的默认值
+            tau = getattr(self.cfg.grpo, 'ref_model_update_tau', 0.01)
             
-            try:
-                # 🔧 修复：确保在获取state_dict前模型处于eval模式，避免与梯度计算冲突
-                original_training_mode = self.model.training
-                self.model.eval()
-                
-                # 使用torch.no_grad确保没有梯度计算干扰
-                with torch.no_grad():
-                    # 步骤 1: 获取DDP模型的状态字典
-                    # DDP模式下直接获取state_dict，无需特殊API
-                    full_state_dict = {k: v.clone().detach().cpu() for k, v in self.model.state_dict().items()}
+            print(f"🔄 软更新参考策略模型 (step {self.global_step}, tau={tau})")
 
-                # 恢复原始训练模式
-                self.model.train(original_training_mode)
+            with torch.no_grad():
+                # 获取当前模型（core_model）和参考模型的参数
+                online_params = self.core_model.parameters()
+                target_params = self.reference_model.parameters()
 
-                # 步骤 2: 使用与创建参考模型时完全相同的键重映射逻辑
-                remapped_state_dict = {}
-                # DDP可能的前缀
-                possible_prefixes = ["module.model.", "model."]
-                
-                # 检查收到的键，确定使用哪个前缀
-                first_key = next(iter(full_state_dict.keys()), "")
-                prefix_to_strip = ""
-                
-                for prefix in possible_prefixes:
-                    if any(k.startswith(prefix) for k in full_state_dict.keys()):
-                        prefix_to_strip = prefix
-                        break
-                
-                # 健壮性检查: 确认预期的前缀存在
-                if not prefix_to_strip:
-                     print(f"    ⚠️ 警告: 更新参考模型时，在 state_dict 中未找到预期的前缀。第一个键是 '{first_key}'。")
-                     print(f"    ℹ️ 将尝试不剥离前缀直接加载。")
-
-                for k, v in full_state_dict.items():
-                    if prefix_to_strip and k.startswith(prefix_to_strip):
-                        new_key = k[len(prefix_to_strip):]
-                        remapped_state_dict[new_key] = v.to(device)  # 移动到正确设备
-                    else:
-                        remapped_state_dict[k] = v.to(device)
-                
-                # 步骤 3: 在no_grad环境下加载新状态到参考模型中
-                with torch.no_grad():
-                    self.reference_model.load_state_dict(remapped_state_dict, strict=True)
-                print("    ✅ 参考模型权重更新成功 (DDP模式)。")
-                
-            except Exception as e:
-                print(f"    ❌ 更新参考模型权重失败: {e}")
-                print(f"    🔧 尝试的解决方案：跳过此次更新，继续训练")
-                import traceback
-                traceback.print_exc()
-                return
-
-            # 步骤 4: 确保参考模型在正确的设备上并处于评估模式
-            self.reference_model = self.reference_model.to(device)
-            self.reference_model.eval()
+                # 执行Polyak平均
+                for online_param, target_param in zip(online_params, target_params):
+                    target_param.data.copy_(
+                        tau * online_param.data + (1.0 - tau) * target_param.data
+                    )
+            
+            # print("    ✅ 参考模型权重软更新成功。")
 
     def _sample_node_counts(self, batch_size: int, device: torch.device) -> torch.Tensor:
         """
@@ -319,7 +279,7 @@ class GRPOTrainer:
         batch_size: int,
         num_nodes: Optional[torch.Tensor] = None,
         seed: Optional[int] = None,
-        total_inference_steps: int = 100,
+        total_inference_steps: int = 50,
     ) -> Tuple[utils.PlaceHolder, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
         从完全噪声状态开始采样图，保持梯度计算并记录采样轨迹的对数概率。
@@ -393,12 +353,12 @@ class GRPOTrainer:
             current_log_probs = torch.zeros(batch_size, device=device, requires_grad=False)
             reference_log_probs = torch.zeros(batch_size, device=device, requires_grad=False)
             pred_final_step = None
-            # --- 参考模型更新检查 ---
-            # 检查当前是否为参考模型的更新步骤。DDP下此操作更简单，无需特殊处理。
-            is_ref_update_step = (self.global_step > 0 and self.global_step % self.ref_model_update_freq == 0)
-            if is_ref_update_step:
-                print(f"   ℹ️ 步骤 {self.global_step}: 即将更新参考模型（DDP模式）。")
-            # --- 检查结束 ---
+            # # --- 参考模型更新检查 ---
+            # # 检查当前是否为参考模型的更新步骤。DDP下此操作更简单，无需特殊处理。
+            # is_ref_update_step = (self.global_step > 0 and self.global_step % self.ref_model_update_freq == 0)
+            # if is_ref_update_step:
+            #     print(f"   ℹ️ 步骤 {self.global_step}: 即将更新参考模型（DDP模式）。")
+            # # --- 检查结束 ---
 
             # 步骤 6: 核心推理循环
             for t_int in tqdm(range(total_inference_steps), desc="  ...采样轨迹", leave=False):
@@ -735,7 +695,9 @@ class GRPOTrainer:
             'loss/kl_divergence': kl_divergence.item(), # 记录原始KL
             'loss/policy_entropy': policy_entropy.item(),
             'grpo_stats/avg_importance_ratio': ratio.mean().item(),
-            'grpo_stats/avg_advantage': advantage.mean().item(),
+            'grpo_stats/max_advantage': advantage.max().item(),
+            'grpo_stats/min_advantage': advantage.min().item(),
+            'grpo_stats/std_advantage': advantage.std().item(),
         })
 
         return {"total_loss": total_loss, "metrics": loss_metrics}
@@ -756,7 +718,8 @@ class GRPOTrainer:
         
         graphs, node_mask, cumulative_loss, current_log_prob, reference_log_prob, model_pred = self.sample_graphs_with_gradients(
             batch_size=self.group_size,
-            seed=unique_seed
+            seed=unique_seed,
+            total_inference_steps=self.sample_steps
         )
         
         sampling_duration = time.time() - start_time

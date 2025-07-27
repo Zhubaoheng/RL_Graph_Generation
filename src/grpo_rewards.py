@@ -27,7 +27,8 @@ class BaseRewardFunction:
     
     def __call__(self, graphs: List[Tuple[torch.Tensor, torch.Tensor]]) -> torch.Tensor:
         """
-        计算图列表的奖励
+        计算图列表的奖励。这是一个为调试目的而设计的简单奖励函数。
+        如果图是连通且平面的，则奖励为1.0，否则为0.1。
         
         Args:
             graphs: List of [atom_types, edge_types] pairs
@@ -35,7 +36,26 @@ class BaseRewardFunction:
         Returns:
             Tensor of rewards for each graph
         """
-        raise NotImplementedError
+        rewards = []
+        for atom_types, edge_types in graphs:
+            try:
+                nx_graph = self._convert_to_networkx(atom_types, edge_types)
+                if nx_graph.number_of_nodes() > 0:
+                    is_connected = nx.is_connected(nx_graph)
+                    # check_planarity returns a tuple (is_planar, certificate)
+                    is_planar, _ = nx.check_planarity(nx_graph)
+                    if is_connected and is_planar:
+                        reward = 1.0
+                    else:
+                        reward = 0.1
+                else:
+                    reward = 0.0
+                rewards.append(reward)
+            except Exception as e:
+                print(f"计算简单奖励时出错: {e}")
+                rewards.append(0.0)
+        
+        return torch.tensor(rewards, dtype=torch.float32, device=self.device)
     
     def _convert_to_networkx(self, atom_types: torch.Tensor, edge_types: torch.Tensor) -> nx.Graph:
         """将图转换为NetworkX格式"""
@@ -983,8 +1003,7 @@ class IntrinsicQualityReward(BaseRewardFunction):
             rewards = self._calculate_sequential(graphs)
         
         avg_reward = np.mean(rewards) if rewards else 0
-        mode = "并行" if use_parallel else "序贯"
-        print(f"💎 [{mode}模式] 内在品质奖励计算完成, 平均奖励: {avg_reward:.4f}")
+        print(f"avg_reward: {avg_reward:.4f}")
 
         return torch.tensor(rewards, dtype=torch.float32, device=self.device)
 
@@ -1308,6 +1327,10 @@ def create_reward_function(
     
     # 新增的并行计算参数
     batch_compute = kwargs.get('batch_compute', True)
+
+    if reward_type == "base":
+        print("📊 创建基础调试奖励函数 (连通性/平面性)")
+        return BaseRewardFunction(device=device)
 
     if reward_type == "default":
         print("📊 创建默认奖励函数")

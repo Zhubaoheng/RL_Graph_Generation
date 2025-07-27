@@ -9,7 +9,7 @@ defaults:
 # 通用配置
 general:
     name : 'grpo_planar'
-    gpus : 3
+    gpus : 1
     swanlab: 'cloud'
     resume: null            # If resume, path to ckpt file from outputs directory in main directory
     test_only: null
@@ -35,8 +35,7 @@ train:
     save_model: True
     n_workers: 32
 sample:
-
-    sample_steps: 100
+    sample_steps: 50
     time_distortion: 'polydec'
     omega: 0.05
     eta: 50
@@ -62,16 +61,18 @@ model:
 grpo:
   # ===== 预训练模型 =====
   pretrained_checkpoint: "/home/ly/max/checkpoints/planar-59999-14h.ckpt"  # 必须指定
-  ref_model_update_freq: 20000
+  ref_model_update_freq: 1
+  ref_model_update_tau: 0.1 # 软更新速率
   # ===== GRPO训练参数（优化后）=====
-  learning_rate: 1e-7    # GRPO通常使用较低的学习率
+  learning_rate: 1e-6    # GRPO通常使用较低的学习率
+  warmup_steps: 100      # 学习率预热步数
   total_steps: 1000000000       # 减少总训练步数用于测试
   save_every: 100           # 每100步保存一次checkpoint
 
   # ===== GRPO算法参数 =====
-  group_size: 16            # 每组的样本数（小批量降低内存）
-  num_groups: 3            # 组数（减少以降低内存使用）
-  kl_penalty: 0.001       # KL散度惩罚系数 (大幅降低，例如从 0.03 降至 0.0001 或更低)
+  group_size: 8            # 每组的样本数（小批量降低内存）
+  num_groups: 8            # 组数（减少以降低内存使用）
+  kl_penalty: 0.1      
   clip_ratio: 0.2          # PPO裁剪比例
   ent_coef: 0.1
   # ===== 节点数配置（减少内存使用）=====
@@ -88,7 +89,6 @@ grpo:
   # ===== 🔧 性能优化参数 =====
   gradient_accumulation_steps: 1  # 梯度累积步数
   gradient_clip_val: 1.0         # 梯度裁剪值
-  reference_update_frequency: 1000 # 参考模型更新频率（降低频率）
   
   # ===== 采样/评估模式 =====
   # 如果设置了此路径，将进入纯采样模式，而不是训练
